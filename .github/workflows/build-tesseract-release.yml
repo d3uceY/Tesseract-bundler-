@@ -1,0 +1,257 @@
+name: Build Tesseract Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tesseract version to build"
+        required: true
+        default: "5.5.3"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-amd64
+            os: windows-2025
+            archive: zip
+
+          - platform: linux-amd64
+            os: ubuntu-24.04
+            archive: tar.gz
+
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+
+          - platform: macos-amd64
+            os: macos-13
+            archive: tar.gz
+
+          - platform: macos-arm64
+            os: macos-14
+            archive: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Tesseract
+        uses: actions/checkout@v5
+        with:
+          repository: tesseract-ocr/tesseract
+          ref: ${{ inputs.version }}
+          submodules: recursive
+
+      # ------------------------------------------------------------
+      # Windows
+      # ------------------------------------------------------------
+
+      - name: Install vcpkg
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:GITHUB_WORKSPACE\vcpkg"
+          & "$env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat"
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\vcpkg\vcpkg.exe" `
+            install `
+            leptonica:x64-windows-static
+
+      - name: Build Tesseract - Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $prefix = "$env:GITHUB_WORKSPACE\package"
+
+          cmake -S . -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX="$prefix" `
+            -DOPENMP_BUILD=OFF `
+            -DBUILD_TRAINING_TOOLS=OFF `
+            -DBUILD_TESTS=OFF `
+            -DWIN32_MT_BUILD=ON `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE\vcpkg\scripts\buildsystems\vcpkg.cmake"
+
+          cmake --build build --config Release --target install
+
+      # ------------------------------------------------------------
+      # Unix
+      # ------------------------------------------------------------
+
+      - name: Install Unix dependencies
+        if: runner.os != 'Windows'
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y \
+              cmake \
+              ninja-build \
+              pkg-config \
+              libicu-dev \
+              libleptonica-dev \
+              libtiff-dev \
+              libpng-dev \
+              libjpeg-dev \
+              libwebp-dev \
+              libopenjp2-7-dev \
+              zlib1g-dev
+          else
+            brew update
+            brew install cmake leptonica
+          fi
+
+      - name: Build Tesseract - Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir build
+          cd build
+
+          cmake .. \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/package" \
+            -DOPENMP_BUILD=OFF \
+            -DBUILD_TRAINING_TOOLS=OFF \
+            -DBUILD_TESTS=OFF
+
+          cmake --build . --parallel
+          cmake --install .
+
+      # ------------------------------------------------------------
+      # Add language data
+      # ------------------------------------------------------------
+
+      - name: Download tessdata
+        shell: bash
+        run: |
+          mkdir -p package/tessdata
+
+          curl -L \
+            -o package/tessdata/eng.traineddata \
+            https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata
+
+          curl -L \
+            -o package/tessdata/osd.traineddata \
+            https://github.com/tesseract-ocr/tessdata/raw/main/osd.traineddata
+
+      # ------------------------------------------------------------
+      # Normalize package layout
+      # ------------------------------------------------------------
+
+      - name: Prepare package
+        shell: bash
+        run: |
+          mkdir -p dist/tesseract
+
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cp -r package/* dist/tesseract/
+
+            # Static Windows builds should not need runtime DLLs.
+            # Keep this check visible if that changes.
+            find dist/tesseract -type f -maxdepth 3
+
+          else
+            cp -r package/* dist/tesseract/
+          fi
+
+          echo "Package contents:"
+          find dist/tesseract -type f
+
+      # ------------------------------------------------------------
+      # Test
+      # ------------------------------------------------------------
+
+      - name: Test Tesseract
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            ./dist/tesseract/bin/tesseract.exe --version
+            ./dist/tesseract/bin/tesseract.exe --list-langs \
+              --tessdata-dir ./dist/tesseract/tessdata
+          else
+            ./dist/tesseract/bin/tesseract --version
+            ./dist/tesseract/bin/tesseract --list-langs \
+              --tessdata-dir ./dist/tesseract/tessdata
+          fi
+
+      # ------------------------------------------------------------
+      # Archive
+      # ------------------------------------------------------------
+
+      - name: Create archive - Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path dist/tesseract `
+            -DestinationPath "tesseract-${{ inputs.version }}-${{ matrix.platform }}.zip"
+
+      - name: Create archive - Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          tar -czf \
+            "tesseract-${{ inputs.version }}-${{ matrix.platform }}.tar.gz" \
+            -C dist \
+            tesseract
+
+      # ------------------------------------------------------------
+      # Upload build artifact
+      # ------------------------------------------------------------
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: tesseract-${{ inputs.version }}-${{ matrix.platform }}
+          path: |
+            *.zip
+            *.tar.gz
+
+  # ==============================================================
+  # Release
+  # ==============================================================
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+          pattern: tesseract-${{ inputs.version }}-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: |
+          sha256sum \
+            *.zip \
+            *.tar.gz \
+            > SHA256SUMS
+
+          cat SHA256SUMS
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: tesseract-${{ inputs.version }}
+          name: Tesseract ${{ inputs.version }}
+          generate_release_notes: true
+          files: |
+            release-assets/*.zip
+            release-assets/*.tar.gz
+            release-assets/SHA256SUMS
