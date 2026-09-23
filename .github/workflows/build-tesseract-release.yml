@@ -1,6 +1,9 @@
 name: Build Tesseract Release
 
 on:
+  push:
+    tags:
+      - "*"
   workflow_dispatch:
     inputs:
       version:
@@ -12,8 +15,25 @@ permissions:
   contents: write
 
 jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: resolve
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build ${{ matrix.platform }}
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -45,7 +65,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: tesseract-ocr/tesseract
-          ref: ${{ inputs.version }}
+          ref: ${{ needs.version.outputs.version }}
           submodules: recursive
 
       # ------------------------------------------------------------
@@ -195,14 +215,14 @@ jobs:
         run: |
           Compress-Archive `
             -Path dist/tesseract `
-            -DestinationPath "tesseract-${{ inputs.version }}-${{ matrix.platform }}.zip"
+            -DestinationPath "tesseract-${{ needs.version.outputs.version }}-${{ matrix.platform }}.zip"
 
       - name: Create archive - Unix
         if: runner.os != 'Windows'
         shell: bash
         run: |
           tar -czf \
-            "tesseract-${{ inputs.version }}-${{ matrix.platform }}.tar.gz" \
+            "tesseract-${{ needs.version.outputs.version }}-${{ matrix.platform }}.tar.gz" \
             -C dist \
             tesseract
 
@@ -213,7 +233,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: tesseract-${{ inputs.version }}-${{ matrix.platform }}
+          name: tesseract-${{ needs.version.outputs.version }}-${{ matrix.platform }}
           path: |
             *.zip
             *.tar.gz
@@ -224,7 +244,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-24.04
 
     steps:
@@ -232,7 +252,7 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           path: release-assets
-          pattern: tesseract-${{ inputs.version }}-*
+          pattern: tesseract-${{ needs.version.outputs.version }}-*
           merge-multiple: true
 
       - name: Generate checksums
@@ -248,8 +268,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: tesseract-${{ inputs.version }}
-          name: Tesseract ${{ inputs.version }}
+          tag_name: tesseract-${{ needs.version.outputs.version }}
+          name: Tesseract ${{ needs.version.outputs.version }}
           generate_release_notes: true
           files: |
             release-assets/*.zip
