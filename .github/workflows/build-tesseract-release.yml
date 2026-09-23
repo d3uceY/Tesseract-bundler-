@@ -78,12 +78,25 @@ jobs:
       # Windows
       # ------------------------------------------------------------
 
+      # Tesseract does `find_package(Leptonica <ver> CONFIG)`, which only looks
+      # at the prefix path the vcpkg toolchain file sets up. That prefix is
+      # derived from VCPKG_TARGET_TRIPLET, so the triplet we *install* and the
+      # triplet CMake *searches* must be identical. A mismatch is not a
+      # "Leptonica missing" problem, it is a "we looked in the wrong triplet
+      # directory" problem - the tell-tale is `missing: Leptonica_DIR` in
+      # config mode.
+      #
+      #   leptonica:x64-windows-static  ->  /MT CRT, matches WIN32_MT_BUILD=ON
+      #   -A x64                        ->  without it the VS generator can
+      #                                     resolve the x86-windows triplet and
+      #                                     silently produce a 32-bit build
       - name: Install vcpkg
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          git clone https://github.com/microsoft/vcpkg.git "$env:GITHUB_WORKSPACE\vcpkg"
-          & "$env:GITHUB_WORKSPACE\vcpkg\bootstrap-vcpkg.bat"
+          $vcpkg = "$env:GITHUB_WORKSPACE\vcpkg"
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$vcpkg"
+          & "$vcpkg\bootstrap-vcpkg.bat" -disableMetrics
 
       - name: Install Windows dependencies
         if: runner.os == 'Windows'
@@ -97,18 +110,28 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $prefix = "$env:GITHUB_WORKSPACE\package"
+          $vcpkg   = "$env:GITHUB_WORKSPACE\vcpkg"
+          $prefix  = "$env:GITHUB_WORKSPACE\package"
+          $triplet = "x64-windows-static"
 
+          # -A x64 must be given explicitly; the toolchain derives the default
+          # triplet from the generator platform, and we only installed one
+          # triplet. DISABLE_CURL/ARCHIVE keep the link line free of stray
+          # system libraries, which would otherwise turn into runtime DLL deps.
           cmake -S . -B build `
+            -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_INSTALL_PREFIX="$prefix" `
+            "-DCMAKE_TOOLCHAIN_FILE=$vcpkg\scripts\buildsystems\vcpkg.cmake" `
+            "-DVCPKG_TARGET_TRIPLET=$triplet" `
             -DOPENMP_BUILD=OFF `
             -DBUILD_TRAINING_TOOLS=OFF `
             -DBUILD_TESTS=OFF `
-            -DWIN32_MT_BUILD=ON `
-            "-DCMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE\vcpkg\scripts\buildsystems\vcpkg.cmake"
+            -DDISABLE_CURL=ON `
+            -DDISABLE_ARCHIVE=ON `
+            -DWIN32_MT_BUILD=ON
 
-          cmake --build build --config Release --target install
+          cmake --build build --config Release --parallel --target install
 
       # ------------------------------------------------------------
       # Unix
@@ -149,7 +172,9 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/package" \
             -DOPENMP_BUILD=OFF \
             -DBUILD_TRAINING_TOOLS=OFF \
-            -DBUILD_TESTS=OFF
+            -DBUILD_TESTS=OFF \
+            -DDISABLE_CURL=ON \
+            -DDISABLE_ARCHIVE=ON
 
           cmake --build . --parallel
           cmake --install .
@@ -163,11 +188,11 @@ jobs:
         run: |
           mkdir -p package/tessdata
 
-          curl -L \
+          curl -L --fail --retry 3 --retry-delay 2 \
             -o package/tessdata/eng.traineddata \
             https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata
 
-          curl -L \
+          curl -L --fail --retry 3 --retry-delay 2 \
             -o package/tessdata/osd.traineddata \
             https://github.com/tesseract-ocr/tessdata/raw/main/osd.traineddata
 
@@ -179,25 +204,35 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/tesseract
+          cp -r package/* dist/tesseract/
 
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            cp -r package/* dist/tesseract/
+            # Ship a portable runtime, not a dev install: bin/ + tessdata/.
+            rm -f dist/tesseract/bin/*.pdb
+            rm -rf dist/tesseract/lib dist/tesseract/include
 
-            # Static Windows builds should not need runtime DLLs.
-            # Keep this check visible if that changes.
-            find dist/tesseract -type f -maxdepth 3
-
-          else
-            cp -r package/* dist/tesseract/
+            # A static build must not depend on sibling DLLs, and leptonica
+            # lives in a *static* triplet so it cannot leak a DLL in here.
+            # If one ever shows up, the "static" assumption has broken and the
+            # shipped package would fail on a clean machine.
+            dlls=$(find dist/tesseract -iname '*.dll')
+            if [[ -n "$dlls" ]]; then
+              echo "::error::Unexpected DLLs in the Windows package - build is no longer self-contained:"
+              echo "$dlls"
+              exit 1
+            fi
           fi
 
           echo "Package contents:"
-          find dist/tesseract -type f
+          find dist/tesseract -maxdepth 3 -type f
 
       # ------------------------------------------------------------
       # Test
       # ------------------------------------------------------------
 
+      # Runs the binary straight out of the packaged tree. vcpkg's installed
+      # bin/ is never on PATH here, so a missing leptonica DLL would fail this
+      # step rather than a user's machine.
       - name: Test Tesseract
         shell: bash
         run: |
