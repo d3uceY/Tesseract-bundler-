@@ -1,5 +1,28 @@
 name: Build Tesseract Release
 
+# Publishes one self-contained Tesseract archive per OS/arch, plus SHA256SUMS.
+#
+# Self-containment is the whole point of this repo. The consumer (vectile)
+# downloads one of these archives at runtime and refuses to keep a binary it
+# cannot execute, so a bundle that piggybacks on the build machine's shared
+# libraries (leptonica, libicu, libtiff, ...) is useless: it installs on the
+# runner and dies on a user's machine. Windows was always built static; the
+# Unix jobs here are now static too.
+#
+# How: leptonica (and its image codecs) are built from source by vcpkg and
+# linked in, instead of linking the distro's/Homebrew's shared liblept + libicu.
+# Tesseract finds leptonica through `find_package(Leptonica CONFIG)`, which
+# resolves against the vcpkg prefix the toolchain file sets up. Each Unix job
+# then *asserts* the result has no non-system dependencies, so a regression
+# fails the build instead of shipping a broken bundle.
+#
+# ICU is deliberately NOT installed: the Windows bundle has always been built
+# without it and OCR does not need it, so leaving it out keeps all five
+# archives consistent and avoids a heavy port build.
+#
+# vcpkg triplet note: the *-linux and *-osx default triplets already produce
+# static libraries. Only Windows needs the explicit `-static` suffix.
+
 on:
   push:
     tags:
@@ -46,14 +69,17 @@ jobs:
         include:
           - platform: windows-amd64
             os: windows-2025
+            triplet: x64-windows-static
             archive: zip
 
           - platform: linux-amd64
             os: ubuntu-24.04
+            triplet: x64-linux
             archive: tar.gz
 
           - platform: linux-arm64
             os: ubuntu-24.04-arm
+            triplet: arm64-linux
             archive: tar.gz
 
           # macos-13 was retired by GitHub; a job on a label with no runner
@@ -61,13 +87,24 @@ jobs:
           # Intel labels are macos-15-intel / macos-26-intel.
           - platform: macos-amd64
             os: macos-15-intel
+            triplet: x64-osx
             archive: tar.gz
 
           - platform: macos-arm64
             os: macos-14
+            triplet: arm64-osx
             archive: tar.gz
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+
+    env:
+      # vcpkg lives beside the checkout, not inside it, so the Tesseract source
+      # tree stays pristine.
+      VCPKG_ROOT: ${{ runner.workspace }}/vcpkg
+      # Reuse compiled ports between runs: leptonica and its codecs build from
+      # source and dominate the job time.
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}/vcpkg-bincache
 
     steps:
       - name: Checkout Tesseract
@@ -78,109 +115,118 @@ jobs:
           submodules: recursive
 
       # ------------------------------------------------------------
-      # Windows
+      # Toolchain
       # ------------------------------------------------------------
 
-      # Tesseract does `find_package(Leptonica <ver> CONFIG)`, which only looks
-      # at the prefix path the vcpkg toolchain file sets up. That prefix is
-      # derived from VCPKG_TARGET_TRIPLET, so the triplet we *install* and the
-      # triplet CMake *searches* must be identical. A mismatch is not a
-      # "Leptonica missing" problem, it is a "we looked in the wrong triplet
-      # directory" problem - the tell-tale is `missing: Leptonica_DIR` in
-      # config mode.
-      #
-      #   leptonica:x64-windows-static  ->  /MT CRT, matches WIN32_MT_BUILD=ON
-      #   -A x64                        ->  without it the VS generator can
-      #                                     resolve the x86-windows triplet and
-      #                                     silently produce a 32-bit build
-      - name: Install vcpkg
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Install vcpkg (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $vcpkg = "$env:GITHUB_WORKSPACE\vcpkg"
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$vcpkg"
-          & "$vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
 
-      - name: Install Windows dependencies
+      - name: Install vcpkg (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ matrix.triplet }}-${{ needs.version.outputs.version }}
+
+      # ------------------------------------------------------------
+      # Dependencies (static leptonica, from source)
+      # ------------------------------------------------------------
+
+      - name: Install leptonica (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & "$env:GITHUB_WORKSPACE\vcpkg\vcpkg.exe" `
-            install `
-            leptonica:x64-windows-static
+          & "$env:VCPKG_ROOT\vcpkg.exe" install leptonica --triplet "${{ matrix.triplet }}" --clean-after-build
 
+      - name: Install leptonica (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          "$VCPKG_ROOT/vcpkg" install leptonica --triplet "${{ matrix.triplet }}" --clean-after-build
+
+      # ------------------------------------------------------------
+      # Build Tesseract
+      # ------------------------------------------------------------
+
+      # -A x64 must be given explicitly; the toolchain derives the default
+      # triplet from the generator platform, and we only installed one triplet.
+      # DISABLE_CURL/ARCHIVE keep the link line free of stray system libraries,
+      # which would otherwise turn into runtime shared-library deps.
+      # GRAPHICS_DISABLED drops the X11/viewer path so nothing drags in libX11.
       - name: Build Tesseract - Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $vcpkg   = "$env:GITHUB_WORKSPACE\vcpkg"
-          $prefix  = "$env:GITHUB_WORKSPACE\package"
-          $triplet = "x64-windows-static"
+          $prefix = "$env:GITHUB_WORKSPACE\package"
 
-          # -A x64 must be given explicitly; the toolchain derives the default
-          # triplet from the generator platform, and we only installed one
-          # triplet. DISABLE_CURL/ARCHIVE keep the link line free of stray
-          # system libraries, which would otherwise turn into runtime DLL deps.
           cmake -S . -B build `
             -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_INSTALL_PREFIX="$prefix" `
-            "-DCMAKE_TOOLCHAIN_FILE=$vcpkg\scripts\buildsystems\vcpkg.cmake" `
-            "-DVCPKG_TARGET_TRIPLET=$triplet" `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            "-DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}" `
+            -DBUILD_SHARED_LIBS=OFF `
             -DOPENMP_BUILD=OFF `
             -DBUILD_TRAINING_TOOLS=OFF `
             -DBUILD_TESTS=OFF `
+            -DGRAPHICS_DISABLED=ON `
             -DDISABLE_CURL=ON `
             -DDISABLE_ARCHIVE=ON `
             -DWIN32_MT_BUILD=ON
 
-          cmake --build build --config Release --parallel --target install
+          cmake --build build --config Release --parallel
+          cmake --install build --config Release
 
-      # ------------------------------------------------------------
-      # Unix
-      # ------------------------------------------------------------
-
-      - name: Install Unix dependencies
-        if: runner.os != 'Windows'
-        run: |
-          if [[ "$RUNNER_OS" == "Linux" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y \
-              cmake \
-              ninja-build \
-              pkg-config \
-              libicu-dev \
-              libleptonica-dev \
-              libtiff-dev \
-              libpng-dev \
-              libjpeg-dev \
-              libwebp-dev \
-              libopenjp2-7-dev \
-              zlib1g-dev
-          else
-            brew update
-            brew install cmake leptonica
-          fi
-
+      # Linux keeps glibc/libc dynamic (those exist everywhere) but links the
+      # C++ runtime statically, so the bundle does not depend on the runner's
+      # libstdc++ version. macOS links the always-present system libc++.
       - name: Build Tesseract - Unix
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir build
-          cd build
+          extra=()
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            extra+=("-DCMAKE_EXE_LINKER_FLAGS=-static-libgcc -static-libstdc++")
+          fi
 
-          cmake .. \
-            -G Ninja \
+          cmake -S . -B build -G Ninja \
+            "${extra[@]}" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/package" \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" \
+            -DBUILD_SHARED_LIBS=OFF \
             -DOPENMP_BUILD=OFF \
             -DBUILD_TRAINING_TOOLS=OFF \
             -DBUILD_TESTS=OFF \
+            -DGRAPHICS_DISABLED=ON \
             -DDISABLE_CURL=ON \
             -DDISABLE_ARCHIVE=ON
 
-          cmake --build . --parallel
-          cmake --install .
+          cmake --build build --parallel
+          cmake --install build
 
       # ------------------------------------------------------------
       # Add language data
@@ -209,11 +255,11 @@ jobs:
           mkdir -p dist/tesseract
           cp -r package/* dist/tesseract/
 
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            # Ship a portable runtime, not a dev install: bin/ + tessdata/.
-            rm -f dist/tesseract/bin/*.pdb
-            rm -rf dist/tesseract/lib dist/tesseract/include
+          # Ship a portable runtime, not a dev install: bin/ + tessdata/.
+          rm -rf dist/tesseract/lib dist/tesseract/include
+          rm -f dist/tesseract/bin/*.pdb
 
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
             # A static build must not depend on sibling DLLs, and leptonica
             # lives in a *static* triplet so it cannot leak a DLL in here.
             # If one ever shows up, the "static" assumption has broken and the
@@ -233,9 +279,9 @@ jobs:
       # Test
       # ------------------------------------------------------------
 
-      # Runs the binary straight out of the packaged tree. vcpkg's installed
-      # bin/ is never on PATH here, so a missing leptonica DLL would fail this
-      # step rather than a user's machine.
+      # Runs the binary straight out of the packaged tree. Nothing from the
+      # vcpkg install tree is on PATH here, so a missing shared library would
+      # fail this step rather than a user's machine.
       - name: Test Tesseract
         shell: bash
         run: |
@@ -247,6 +293,45 @@ jobs:
             ./dist/tesseract/bin/tesseract --version
             ./dist/tesseract/bin/tesseract --list-langs \
               --tessdata-dir ./dist/tesseract/tessdata
+          fi
+
+      # ------------------------------------------------------------
+      # Prove self-containment
+      # ------------------------------------------------------------
+
+      # Only glibc-family system libraries are acceptable. Anything resolving
+      # out of the runner's home, /opt, or a vcpkg tree means a dependency was
+      # linked dynamically after all, and the bundle is not portable.
+      - name: Verify self-contained (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "Dynamic dependencies:"
+          ldd dist/tesseract/bin/tesseract
+
+          if ldd dist/tesseract/bin/tesseract | grep -q 'not found'; then
+            echo "::error::tesseract is missing a shared library on this runner"
+            exit 1
+          fi
+
+          if ldd dist/tesseract/bin/tesseract | grep -E '/(home|opt)/|vcpkg'; then
+            echo "::error::tesseract still links a non-system library - bundle is not self-contained"
+            exit 1
+          fi
+
+      # Static libraries do not appear in otool -L at all, so a clean bundle
+      # lists only /usr/lib/*. A Homebrew path means something was linked
+      # dynamically from the build machine.
+      - name: Verify self-contained (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "Linked libraries:"
+          otool -L dist/tesseract/bin/tesseract
+
+          if otool -L dist/tesseract/bin/tesseract | grep -E '/(opt/homebrew|usr/local)/'; then
+            echo "::error::tesseract links a Homebrew library - bundle is not self-contained"
+            exit 1
           fi
 
       # ------------------------------------------------------------
@@ -285,7 +370,6 @@ jobs:
   # ==============================================================
   # Release
   # ==============================================================
-
   release:
     name: Create GitHub Release
     needs: [version, build]
