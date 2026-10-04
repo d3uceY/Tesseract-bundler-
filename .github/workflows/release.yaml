@@ -100,11 +100,13 @@ jobs:
 
     env:
       # vcpkg lives beside the checkout, not inside it, so the Tesseract source
-      # tree stays pristine.
-      VCPKG_ROOT: ${{ runner.workspace }}/vcpkg
+      # tree stays pristine. `github.workspace` is the checkout itself, so `..`
+      # is the runner workspace (the `runner` context is not available in a
+      # job-level `env:` block).
+      VCPKG_ROOT: ${{ github.workspace }}/../vcpkg
       # Reuse compiled ports between runs: leptonica and its codecs build from
       # source and dominate the job time.
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}/vcpkg-bincache
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/../vcpkg-bincache
 
     steps:
       - name: Checkout Tesseract
