@@ -28,52 +28,27 @@ Each archive unpacks to `tesseract/` with a portable runtime layout — `bin/` p
 
 ## Running a release
 
-The Tesseract version is pinned in `TESSERACT_VERSION` (one line, e.g. `5.5.3`). The workflow
-reads that file — **not** the git tag name — to decide what to build, so bump the file first
-if you want a different version.
+The Tesseract version is pinned in `TESSERACT_VERSION`. A tag such as
+`tesseract-5.5.3` publishes assets under the same release and archive names
+used by Vectile. The executable remains `bin/tesseract`.
 
-### Releasing a new version
+To repair the existing 5.5.3 release, merge the reviewed workflow changes and
+run **Actions → Build Tesseract Release → Run workflow** from the updated main
+branch with version `5.5.3`. Do not rerun the old tag workflow: it runs the
+workflow stored in that old commit. The manual run rebuilds all platforms and
+replaces the assets and checksums at the existing release URL.
 
-```bash
-# 1. Pin the Tesseract version to build.
-echo "5.5.3" > TESSERACT_VERSION
-git add TESSERACT_VERSION
-git commit -m "Bump Tesseract to 5.5.3"
-git push origin main
+The workflow validates the build before upload, then downloads the release
+assets, verifies checksums, checks both macOS binaries for non-system
+libraries, and smoke-tests the Apple Silicon binary. Asset replacement is not
+atomic: downloads during the upload may fail checksum verification and should
+be retried. Check the workflow's final verification before announcing a
+repair. A clean-machine OCR test is still recommended. Existing Vectile
+installations may need to remove and reinstall the OCR plugin.
 
-# 2. Tag main and push THE TAG. The push is what triggers the build.
-git tag tesseract-5.5.3
-git push origin tesseract-5.5.3
-```
-
-Pushing the tag runs `.github/workflows/release.yaml`, which builds all five platforms and,
-on success, creates the GitHub release `tesseract-5.5.3` with the archives and `SHA256SUMS`.
-Expect roughly **30–90 minutes** (leptonica builds from source; the vcpkg binary cache makes
-repeat runs much faster).
-
-### Re-running / re-releasing the same version
-
-Tags are immutable on the remote once pushed, so to retrigger a build for a version that
-already has a tag, move the tag to the commit you want and force-push it:
-
-```bash
-git tag -f tesseract-5.5.3 main
-git push --force origin tesseract-5.5.3
-```
-
-Or skip tagging entirely and run the workflow manually from the Actions tab
-(**Actions → Build Tesseract Release → Run workflow**), typing the version to build.
-
-## Important rules
-
-- **Tag `main`, not an old commit.** A tag push runs the workflow *as it existed at the
-  tagged commit*. If the tag points at an outdated commit, it runs an outdated pipeline —
-  which historically meant non-self-contained Unix bundles. Always tag the current `main`.
-- **One tag push = one build.** Pushing several tags at once starts several concurrent runs
-  that all publish the same release and race on the same asset filenames. Push one tag.
-- **The release name comes from `TESSERACT_VERSION`**, not the tag: a tag named `v0.2.0` still
-  produces a release named `tesseract-5.5.3`. Name tags for the Tesseract version to avoid
-  confusion.
+For a new Tesseract version, update `TESSERACT_VERSION`, commit to main, and
+push the corresponding `tesseract-<version>` tag. Run only one release at a
+time and never rerun an old workflow that can overwrite verified assets.
 
 ## Workflow notes
 

@@ -26,7 +26,7 @@ name: Build Tesseract Release
 on:
   push:
     tags:
-      - "*"
+      - "tesseract-*"
   workflow_dispatch:
     inputs:
       version:
@@ -37,28 +37,43 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: tesseract-release
+  cancel-in-progress: false
+
 jobs:
   version:
     name: Resolve version
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.resolve.outputs.version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
     steps:
       - name: Checkout bundler repo
-        if: github.event_name != 'workflow_dispatch'
         uses: actions/checkout@v5
 
-      - name: Resolve version
+      - name: Resolve version and release tag
         id: resolve
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="$INPUT_VERSION"
+            tag="tesseract-$version"
           else
-            # Tag push triggers build the version pinned in TESSERACT_VERSION,
-            # not the bundler repo's own tag name.
-            echo "version=$(tr -d '[:space:]' < TESSERACT_VERSION)" >> "$GITHUB_OUTPUT"
+            version="$(tr -d '[:space:]' < TESSERACT_VERSION)"
+            tag="$REF_NAME"
           fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+             [[ "$tag" != "tesseract-$version" ]]; then
+            echo "::error::Use a version like 5.5.3 and the matching tesseract-5.5.3 tag"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.platform }}
@@ -331,8 +346,8 @@ jobs:
           echo "Linked libraries:"
           otool -L dist/tesseract/bin/tesseract
 
-          if otool -L dist/tesseract/bin/tesseract | grep -E '/(opt/homebrew|usr/local)/'; then
-            echo "::error::tesseract links a Homebrew library - bundle is not self-contained"
+          if otool -L dist/tesseract/bin/tesseract | tail -n +2 | awk '{print $1}' | grep -v '^/usr/lib/'; then
+            echo "::error::tesseract links a non-system library - bundle is not self-contained"
             exit 1
           fi
 
@@ -376,6 +391,9 @@ jobs:
     name: Create GitHub Release
     needs: [version, build]
     runs-on: ubuntu-24.04
+    concurrency:
+      group: release-${{ needs.version.outputs.release_tag }}
+      cancel-in-progress: false
 
     steps:
       - name: Download all artifacts
@@ -388,7 +406,7 @@ jobs:
       - name: Generate checksums
         working-directory: release-assets
         run: |
-          sha256sum \
+          sha256sum -- \
             *.zip \
             *.tar.gz \
             > SHA256SUMS
@@ -398,10 +416,46 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: tesseract-${{ needs.version.outputs.version }}
+          tag_name: ${{ needs.version.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          overwrite_files: true
           name: Tesseract ${{ needs.version.outputs.version }}
           generate_release_notes: true
           files: |
             release-assets/*.zip
             release-assets/*.tar.gz
             release-assets/SHA256SUMS
+
+
+  verify-published:
+    name: Verify published macOS archives
+    needs: [version, release]
+    runs-on: macos-14
+    steps:
+      - name: Download release assets and verify checksums and dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.version.outputs.release_tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir published
+          gh release download "$RELEASE_TAG" --repo "$GH_REPO" --dir published
+          cd published
+          shasum -a 256 -c SHA256SUMS
+          for arch in arm64 amd64; do
+            mkdir "$arch"
+            tar -xzf "tesseract-${VERSION}-macos-${arch}.tar.gz" -C "$arch"
+            binary="$arch/tesseract/bin/tesseract"
+            otool -L "$binary"
+            # Only macOS system libraries are valid: reject Homebrew, @rpath,
+            # and other machine-specific paths, not just known brew prefixes.
+            if otool -L "$binary" | tail -n +2 | awk '{print $1}' | grep -v '^/usr/lib/'; then
+              echo "::error::Published $arch binary depends on a non-system library"
+              exit 1
+            fi
+          done
+          ./arm64/tesseract/bin/tesseract --version
+          ./arm64/tesseract/bin/tesseract --list-langs --tessdata-dir ./arm64/tesseract/tessdata
