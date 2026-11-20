@@ -58,5 +58,7 @@ time and never rerun an old workflow that can overwrite verified assets.
   Tesseract source tree stays pristine.
 - Windows uses the `x64-windows-static` triplet (explicit `-static` suffix is required);
   the `*-linux` and `*-osx` default triplets already build static libraries.
-- macOS runners: `macos-13` is retired. Use `macos-15-intel` for Intel — a job on a label
-  with no runner queues until the 24h limit instead of failing fast.
+- macOS runners: `macos-13` **and** `macos-14` are retired. Use `macos-15-intel` for Intel
+  and `macos-15` for arm64. A retired label fails immediately with
+  `The configuration 'macos-14-arm64-us-default' is not supported`; a label with no
+  runner at all queues until the 24h limit instead of failing fast.

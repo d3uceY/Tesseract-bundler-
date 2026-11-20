@@ -97,16 +97,19 @@ jobs:
             triplet: arm64-linux
             archive: tar.gz
 
-          # macos-13 was retired by GitHub; a job on a label with no runner
-          # queues until the 24h limit instead of failing fast. The supported
-          # Intel labels are macos-15-intel / macos-26-intel.
+          # GitHub retires macOS images; a job on a retired label fails with
+          # "The configuration 'macos-14-arm64-us-default' is not supported"
+          # (or queues until the 24h limit). For public repos the labels are
+          # macos-15-intel / macos-26-intel (Intel) and macos-15 / macos-26 /
+          # macos-latest (arm64). macos-13 and macos-14 are both gone.
+          # Both macOS bundles stay on 15 so they target the same OS.
           - platform: macos-amd64
             os: macos-15-intel
             triplet: x64-osx
             archive: tar.gz
 
           - platform: macos-arm64
-            os: macos-14
+            os: macos-15
             triplet: arm64-osx
             archive: tar.gz
 
@@ -430,7 +433,8 @@ jobs:
   verify-published:
     name: Verify published macOS archives
     needs: [version, release]
-    runs-on: macos-14
+    # arm64 label: matches the macos-arm64 build job. macos-14 is retired.
+    runs-on: macos-15
     steps:
       - name: Download release assets and verify checksums and dependencies
         env:
