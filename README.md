@@ -28,28 +28,27 @@ Each archive unpacks to `tesseract/` with a portable runtime layout — `bin/` p
 
 ## Running a release
 
-Tesseract's version and the bundle revision are separate. Create a **new** tag
-for every bundle release, including rebuilds of the same Tesseract version:
+The Tesseract version is pinned in `TESSERACT_VERSION`. A tag such as
+`tesseract-5.5.3` publishes assets under the same release and archive names
+used by Vectile. The executable remains `bin/tesseract`.
 
-```bash
-# Pin the upstream version, commit, and push the changes to main first.
-printf '5.5.3\n' > TESSERACT_VERSION
-# Create a new bundle revision from the reviewed commit.
-git tag tesseract-5.5.3-bundle.1
-git push origin tesseract-5.5.3-bundle.1
-```
+To repair the existing 5.5.3 release, merge the reviewed workflow changes and
+run **Actions → Build Tesseract Release → Run workflow** from the updated main
+branch with version `5.5.3`. Do not rerun the old tag workflow: it runs the
+workflow stored in that old commit. The manual run rebuilds all platforms and
+replaces the assets and checksums at the existing release URL.
 
-A tag push starts the build. Manual dispatch requires both the Tesseract version
-and a new release tag in the same `tesseract-<version>-bundle.<revision>` format.
-Existing releases are never reused. Consumers must update their release URL to
-the new tag; archive filenames still use the upstream Tesseract version.
+The workflow validates the build before upload, then downloads the release
+assets, verifies checksums, checks both macOS binaries for non-system
+libraries, and smoke-tests the Apple Silicon binary. Asset replacement is not
+atomic: downloads during the upload may fail checksum verification and should
+be retried. Check the workflow's final verification before announcing a
+repair. A clean-machine OCR test is still recommended. Existing Vectile
+installations may need to remove and reinstall the OCR plugin.
 
-The release is created as a draft. The workflow downloads its assets, verifies
-checksums, inspects both macOS binaries for non-system dependencies and smoke
-tests the Apple Silicon binary before publishing. If verification fails, the
-draft stays unpublished for investigation. A clean-machine OCR test is still
-recommended before users adopt a new bundle. Never rerun an old tag or an old
-workflow that can overwrite an existing release.
+For a new Tesseract version, update `TESSERACT_VERSION`, commit to main, and
+push the corresponding `tesseract-<version>` tag. Run only one release at a
+time and never rerun an old workflow that can overwrite verified assets.
 
 ## Workflow notes
 

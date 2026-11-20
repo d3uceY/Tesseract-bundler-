@@ -33,12 +33,13 @@ on:
         description: "Tesseract version to build"
         required: true
         default: "5.5.3"
-      release_tag:
-        description: "New bundle release tag (e.g. tesseract-5.5.3-bundle.1)"
-        required: true
 
 permissions:
   contents: write
+
+concurrency:
+  group: tesseract-release
+  cancel-in-progress: false
 
 jobs:
   version:
@@ -57,20 +58,18 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ inputs.version }}
-          INPUT_TAG: ${{ inputs.release_tag }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             version="$INPUT_VERSION"
-            tag="$INPUT_TAG"
+            tag="tesseract-$version"
           else
             version="$(tr -d '[:space:]' < TESSERACT_VERSION)"
             tag="$REF_NAME"
           fi
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-             [[ "$tag" != "tesseract-${version}-bundle."* ]] ||
-             [[ ! "${tag#"tesseract-${version}-bundle."}" =~ ^[0-9]+$ ]]; then
-            echo "::error::Use a version like 5.5.3 and a new tag like tesseract-5.5.3-bundle.1"
+             [[ "$tag" != "tesseract-$version" ]]; then
+            echo "::error::Use a version like 5.5.3 and the matching tesseract-5.5.3 tag"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -347,8 +346,8 @@ jobs:
           echo "Linked libraries:"
           otool -L dist/tesseract/bin/tesseract
 
-          if otool -L dist/tesseract/bin/tesseract | grep -E '/(opt/homebrew|usr/local)/'; then
-            echo "::error::tesseract links a Homebrew library - bundle is not self-contained"
+          if otool -L dist/tesseract/bin/tesseract | tail -n +2 | awk '{print $1}' | grep -v '^/usr/lib/'; then
+            echo "::error::tesseract links a non-system library - bundle is not self-contained"
             exit 1
           fi
 
@@ -397,19 +396,6 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - name: Refuse to replace a release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.version.outputs.release_tag }}
-        run: |
-          # List releases rather than treating an arbitrary API error as "not found".
-          gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name' > release-tags.txt
-          if grep -Fxq -- "$RELEASE_TAG" release-tags.txt; then
-            echo "::error::Release $RELEASE_TAG already exists; choose a new bundle revision"
-            exit 1
-          fi
-
       - name: Download all artifacts
         uses: actions/download-artifact@v7
         with:
@@ -432,8 +418,7 @@ jobs:
         with:
           tag_name: ${{ needs.version.outputs.release_tag }}
           target_commitish: ${{ github.sha }}
-          overwrite_files: false
-          draft: true
+          overwrite_files: true
           name: Tesseract ${{ needs.version.outputs.version }}
           generate_release_notes: true
           files: |
@@ -474,10 +459,3 @@ jobs:
           done
           ./arm64/tesseract/bin/tesseract --version
           ./arm64/tesseract/bin/tesseract --list-langs --tessdata-dir ./arm64/tesseract/tessdata
-
-      - name: Publish verified draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.version.outputs.release_tag }}
-        run: gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false
