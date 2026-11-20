@@ -28,52 +28,28 @@ Each archive unpacks to `tesseract/` with a portable runtime layout — `bin/` p
 
 ## Running a release
 
-The Tesseract version is pinned in `TESSERACT_VERSION` (one line, e.g. `5.5.3`). The workflow
-reads that file — **not** the git tag name — to decide what to build, so bump the file first
-if you want a different version.
-
-### Releasing a new version
+Tesseract's version and the bundle revision are separate. Create a **new** tag
+for every bundle release, including rebuilds of the same Tesseract version:
 
 ```bash
-# 1. Pin the Tesseract version to build.
-echo "5.5.3" > TESSERACT_VERSION
-git add TESSERACT_VERSION
-git commit -m "Bump Tesseract to 5.5.3"
-git push origin main
-
-# 2. Tag main and push THE TAG. The push is what triggers the build.
-git tag tesseract-5.5.3
-git push origin tesseract-5.5.3
+# Pin the upstream version, commit, and push the changes to main first.
+printf '5.5.3\n' > TESSERACT_VERSION
+# Create a new bundle revision from the reviewed commit.
+git tag tesseract-5.5.3-bundle.1
+git push origin tesseract-5.5.3-bundle.1
 ```
 
-Pushing the tag runs `.github/workflows/release.yaml`, which builds all five platforms and,
-on success, creates the GitHub release `tesseract-5.5.3` with the archives and `SHA256SUMS`.
-Expect roughly **30–90 minutes** (leptonica builds from source; the vcpkg binary cache makes
-repeat runs much faster).
+A tag push starts the build. Manual dispatch requires both the Tesseract version
+and a new release tag in the same `tesseract-<version>-bundle.<revision>` format.
+Existing releases are never reused. Consumers must update their release URL to
+the new tag; archive filenames still use the upstream Tesseract version.
 
-### Re-running / re-releasing the same version
-
-Tags are immutable on the remote once pushed, so to retrigger a build for a version that
-already has a tag, move the tag to the commit you want and force-push it:
-
-```bash
-git tag -f tesseract-5.5.3 main
-git push --force origin tesseract-5.5.3
-```
-
-Or skip tagging entirely and run the workflow manually from the Actions tab
-(**Actions → Build Tesseract Release → Run workflow**), typing the version to build.
-
-## Important rules
-
-- **Tag `main`, not an old commit.** A tag push runs the workflow *as it existed at the
-  tagged commit*. If the tag points at an outdated commit, it runs an outdated pipeline —
-  which historically meant non-self-contained Unix bundles. Always tag the current `main`.
-- **One tag push = one build.** Pushing several tags at once starts several concurrent runs
-  that all publish the same release and race on the same asset filenames. Push one tag.
-- **The release name comes from `TESSERACT_VERSION`**, not the tag: a tag named `v0.2.0` still
-  produces a release named `tesseract-5.5.3`. Name tags for the Tesseract version to avoid
-  confusion.
+The release is created as a draft. The workflow downloads its assets, verifies
+checksums, inspects both macOS binaries for non-system dependencies and smoke
+tests the Apple Silicon binary before publishing. If verification fails, the
+draft stays unpublished for investigation. A clean-machine OCR test is still
+recommended before users adopt a new bundle. Never rerun an old tag or an old
+workflow that can overwrite an existing release.
 
 ## Workflow notes
 
